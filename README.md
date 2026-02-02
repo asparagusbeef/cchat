@@ -109,6 +109,7 @@ cchat:
 - Python 3.8+
 - No dependencies (stdlib only)
 - Clipboard copy uses `clip.exe` (WSL) — other platforms not yet supported
+- Tested against Claude Code 2.1.27 on WSL. Future Claude Code releases may change the internal JSONL session format and break compatibility.
 
 ## Contributing
 

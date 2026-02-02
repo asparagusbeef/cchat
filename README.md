@@ -1,5 +1,11 @@
 # cchat
 
+[![Tests](https://github.com/asparagusbeef/cchat/actions/workflows/test.yml/badge.svg)](https://github.com/asparagusbeef/cchat/actions/workflows/test.yml)
+[![codecov](https://codecov.io/gh/asparagusbeef/cchat/graph/badge.svg)](https://codecov.io/gh/asparagusbeef/cchat)
+[![PyPI](https://img.shields.io/pypi/v/cchat)](https://pypi.org/project/cchat/)
+[![Python](https://img.shields.io/pypi/pyversions/cchat)](https://pypi.org/project/cchat/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Browse and search Claude Code conversation history from the terminal.
 
 `cchat` reads the JSONL conversation logs that Claude Code stores in `~/.claude/projects/` and presents them as readable conversation turns. It handles compaction stitching, branch detection, and the full UUID tree structure so you don't have to parse raw JSONL yourself.
@@ -103,6 +109,48 @@ cchat:
 - Python 3.8+
 - No dependencies (stdlib only)
 - Clipboard copy uses `clip.exe` (WSL) — other platforms not yet supported
+
+## Contributing
+
+### Setup
+
+```bash
+git clone https://github.com/asparagusbeef/cchat.git
+cd cchat
+pip install -e ".[test]"
+```
+
+### Running tests
+
+```bash
+pytest -v                          # full suite
+pytest tests/test_session.py -v    # single module
+pytest --cov=cchat --cov-report=term   # with coverage
+```
+
+### Project structure
+
+```
+cchat.py          # entire application (single-file)
+tests/
+  conftest.py     # shared fixtures, mock project dirs
+  fixtures/       # synthetic JSONL sessions matching real Claude Code format
+  test_utils.py
+  test_formatting.py
+  test_session.py
+  test_message_extraction.py
+  test_project_resolver.py
+  test_session_index.py
+  test_cli.py
+```
+
+Test fixtures are synthetic JSONL files that match the real Claude Code session format (streaming chunks, UUID trees, compaction boundaries). See `tests/fixtures/` for examples of the expected data shape.
+
+### Guidelines
+
+- Keep it as a single Python file with zero runtime dependencies.
+- Tests go in `tests/`. Fixtures go in `tests/fixtures/`.
+- Run the full test suite before opening a PR.
 
 ## License
 

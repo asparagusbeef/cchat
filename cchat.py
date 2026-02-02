@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-__version__ = "0.1.0"
+__version__ = "1.0.0"
 
 import argparse
 import json
@@ -123,6 +123,24 @@ class BranchPoint:
     line_index: int  # file position of the parent entry
 
 
+@dataclass
+class BranchChild:
+    child_uuid: str
+    branch_number: int      # 1-indexed by file order
+    preview: str            # first user text on this branch (~80 chars)
+    turn_count: int         # user-text turns on this branch only (not common prefix)
+    entry_count: int        # entries from child to leaf
+    is_active: bool
+
+
+@dataclass
+class BranchInfo:
+    parent_uuid: str
+    parent_line_index: int
+    turn_number: int        # which turn on the common prefix this occurs after
+    children: list          # list[BranchChild]
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # UTILITIES
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -151,6 +169,14 @@ def _truncate(text: str, max_len: int) -> str:
     if max_len <= 0 or len(text) <= max_len:
         return text
     return text[:max_len] + "..."
+
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def _strip_ansi(text: str) -> str:
+    """Remove ANSI escape sequences from text."""
+    return _ANSI_RE.sub("", text)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -387,6 +413,7 @@ class Session:
         self._by_uuid: Optional[dict] = None
         self._children: Optional[dict] = None
         self._entry_positions: Optional[dict] = None  # uuid -> file line index
+        self._logical_parent_map: Optional[dict] = None
 
     def _load(self):
         """Single-pass load of all entries."""
@@ -442,32 +469,35 @@ class Session:
                     self._children[parent].append(uuid)
         return self._children
 
-    def active_path(self, stitch: bool = True) -> list[dict]:
-        """
-        Extract the active conversation path.
+    @property
+    def logical_parent_map(self) -> dict:
+        """Map: logicalParentUuid -> compact_boundary UUID. For forward compaction stitching."""
+        if self._logical_parent_map is None:
+            self._logical_parent_map = {}
+            for entry in self.entries:
+                lp = entry.get("logicalParentUuid")
+                if lp and entry.get("subtype") in ("compact_boundary", "microcompact_boundary"):
+                    self._logical_parent_map[lp] = entry["uuid"]
+        return self._logical_parent_map
 
-        1. Find the last entry with a UUID (by file position)
-        2. Walk backward via parentUuid
-        3. At compact_boundary entries, optionally stitch via logicalParentUuid
-        4. Return path in root-to-leaf order
-        """
-        # Find the last UUID entry that is NOT a sidechain and NOT progress
-        last_entry = None
+    def _find_last_uuid(self) -> Optional[dict]:
+        """Find the last entry with a UUID that is not a sidechain."""
         for entry in reversed(self.entries):
             uuid = entry.get("uuid")
             if not uuid:
                 continue
             if entry.get("isSidechain"):
                 continue
-            last_entry = entry
-            break
+            return entry
+        return None
 
-        if not last_entry:
-            return []
-
-        # Walk backward
+    def _walk_backward(self, start_uuid: str, stitch: bool = True) -> list[dict]:
+        """
+        Walk backward from start_uuid via parentUuid, stitching compaction boundaries.
+        Returns path in root-to-leaf order.
+        """
         raw_path = []
-        current_uuid = last_entry.get("uuid")
+        current_uuid = start_uuid
         visited = set()
 
         while current_uuid and current_uuid not in visited:
@@ -475,9 +505,6 @@ class Session:
             entry = self.by_uuid.get(current_uuid)
             if not entry:
                 if stitch and raw_path:
-                    # Broken parent link (e.g., context continuation).
-                    # Bridge by finding the last UUID entry before the
-                    # earliest entry in our path so far.
                     earliest_line = min(
                         e.get("_line", float("inf")) for e in raw_path
                     )
@@ -497,14 +524,10 @@ class Session:
 
             if entry.get("subtype") == "compact_boundary":
                 if stitch:
-                    # Jump to the entry before compaction
                     logical_parent = entry.get("logicalParentUuid")
                     if logical_parent and logical_parent in self.by_uuid:
                         current_uuid = logical_parent
                     else:
-                        # logicalParentUuid target missing — fallback:
-                        # find the last UUID entry before this compact_boundary
-                        # in file order (it's part of the pre-compaction tree)
                         cb_line = entry.get("_line", float("inf"))
                         fallback = None
                         for e in reversed(self.entries):
@@ -518,13 +541,253 @@ class Session:
                         else:
                             break
                 else:
-                    # No stitching, stop at compaction boundary
                     break
             else:
                 current_uuid = entry.get("parentUuid")
 
         raw_path.reverse()
         return raw_path
+
+    def _find_leaf(self, start_uuid: str, max_line: float = float("inf")) -> str:
+        """
+        Forward walk from start_uuid to leaf, with compaction stitching.
+        Returns the leaf UUID.
+
+        1. Follow children, preferring latest by file position
+        2. At dead end, try logical_parent_map for compaction stitch
+        3. Fallback: find next compact/microcompact boundary in file order
+        4. max_line prevents jumping into another branch's compaction
+        """
+        current_uuid = start_uuid
+        visited = set()
+
+        while current_uuid not in visited:
+            visited.add(current_uuid)
+            child_uuids = self.children.get(current_uuid, [])
+
+            # Filter children within max_line bound
+            valid_children = []
+            for cu in child_uuids:
+                child_entry = self.by_uuid.get(cu)
+                if child_entry and child_entry.get("_line", 0) < max_line:
+                    valid_children.append(cu)
+
+            if valid_children:
+                # Prefer latest by file position
+                best = max(valid_children,
+                           key=lambda u: self.by_uuid[u].get("_line", 0))
+                current_uuid = best
+                continue
+
+            # Dead end — try compaction stitching
+            stitch_uuid = self.logical_parent_map.get(current_uuid)
+            if stitch_uuid and stitch_uuid not in visited:
+                stitch_entry = self.by_uuid.get(stitch_uuid)
+                if stitch_entry and stitch_entry.get("_line", 0) < max_line:
+                    current_uuid = stitch_uuid
+                    continue
+
+            # Fallback: find next compact/microcompact boundary after current in file order
+            current_line = self.by_uuid.get(current_uuid, {}).get("_line", 0)
+            best_boundary = None
+            best_line = float("inf")
+            for entry in self.entries:
+                eline = entry.get("_line", 0)
+                if eline <= current_line or eline >= max_line:
+                    continue
+                if entry.get("subtype") in ("compact_boundary", "microcompact_boundary"):
+                    if eline < best_line:
+                        best_boundary = entry.get("uuid")
+                        best_line = eline
+                        break  # entries are in file order, first match is earliest
+            if best_boundary and best_boundary not in visited:
+                current_uuid = best_boundary
+                continue
+
+            break
+
+        return current_uuid
+
+    def active_path(self, stitch: bool = True, branch: int = 0) -> list[dict]:
+        """
+        Extract a conversation path.
+
+        branch=0: active path (latest leaf, existing behavior)
+        branch=N: Nth branch child at first branch point, walked to its leaf
+        """
+        if branch > 0:
+            return self._branch_path(branch, stitch)
+
+        last_entry = self._find_last_uuid()
+        if not last_entry:
+            return []
+
+        return self._walk_backward(last_entry["uuid"], stitch)
+
+    def _branch_path(self, branch: int, stitch: bool = True) -> list[dict]:
+        """Get path for the Nth branch (1-indexed) at the first real branch point."""
+        # Get active path to find branch points
+        active = self.active_path(stitch=stitch, branch=0)
+        if not active:
+            return []
+
+        active_set = {e.get("uuid") for e in active if e.get("uuid")}
+
+        # Find first real branch point on the active path
+        checked_parents = set()
+        for entry in active:
+            parent_uuid = entry.get("parentUuid")
+            if not parent_uuid or parent_uuid in checked_parents:
+                continue
+            checked_parents.add(parent_uuid)
+
+            child_uuids = self.children.get(parent_uuid, [])
+            if len(child_uuids) <= 1:
+                continue
+            if self._is_mechanical_fork(parent_uuid, child_uuids):
+                continue
+
+            # Real branch point found — get ALL children sorted by file position
+            all_children = sorted(
+                child_uuids,
+                key=lambda u: self.by_uuid.get(u, {}).get("_line", 0),
+            )
+
+            if branch < 1 or branch > len(all_children):
+                print(f"Error: Branch {branch} out of range (1-{len(all_children)})",
+                      file=sys.stderr)
+                sys.exit(1)
+
+            target_uuid = all_children[branch - 1]
+
+            # Compute max_line: line of next branch child in file order, or inf
+            target_idx = branch - 1
+            if target_idx + 1 < len(all_children):
+                next_child = all_children[target_idx + 1]
+                max_line = self.by_uuid.get(next_child, {}).get("_line", float("inf"))
+            else:
+                max_line = float("inf")
+
+            # Walk forward to leaf, then backward
+            leaf_uuid = self._find_leaf(target_uuid, max_line)
+            path = self._walk_backward(leaf_uuid, stitch)
+
+            # Include the common prefix (entries up to and including the branch parent)
+            parent_entry = self.by_uuid.get(parent_uuid)
+            if parent_entry:
+                prefix = self._walk_backward(parent_uuid, stitch)
+                # Merge: prefix + branch-specific entries
+                prefix_uuids = {e.get("uuid") for e in prefix}
+                branch_only = [e for e in path if e.get("uuid") not in prefix_uuids]
+                return prefix + branch_only
+
+            return path
+
+        # No branch points found
+        print("Error: No branch points found in this session.", file=sys.stderr)
+        sys.exit(1)
+
+    def get_branch_info(self) -> list[BranchInfo]:
+        """
+        Get detailed info about all real branch points.
+        Returns list[BranchInfo] with preview, turn count, etc. for each child.
+        """
+        active = self.active_path(stitch=True, branch=0)
+        if not active:
+            return []
+
+        active_set = {e.get("uuid") for e in active if e.get("uuid")}
+
+        # Figure out which turn number each entry falls on
+        active_turns = group_into_turns(active, mode="text")
+        # Map: uuid -> turn number (1-indexed)
+        uuid_to_turn = {}
+        for ti, turn in enumerate(active_turns, 1):
+            uuid_to_turn[turn.uuid] = ti
+
+        results = []
+        checked_parents = set()
+
+        for entry in active:
+            parent_uuid = entry.get("parentUuid")
+            if not parent_uuid or parent_uuid in checked_parents:
+                continue
+            checked_parents.add(parent_uuid)
+
+            child_uuids = self.children.get(parent_uuid, [])
+            if len(child_uuids) <= 1:
+                continue
+            if self._is_mechanical_fork(parent_uuid, child_uuids):
+                continue
+
+            # Real branch point — get ALL children sorted by file position
+            all_children = sorted(
+                child_uuids,
+                key=lambda u: self.by_uuid.get(u, {}).get("_line", 0),
+            )
+
+            # Determine which turn this branch occurs after
+            parent_entry = self.by_uuid.get(parent_uuid)
+            turn_number = uuid_to_turn.get(parent_uuid, 0)
+            # If parent itself isn't a turn, find nearest prior turn
+            if turn_number == 0 and parent_entry:
+                parent_line = parent_entry.get("_line", 0)
+                for turn in reversed(active_turns):
+                    turn_entry = self.by_uuid.get(turn.uuid)
+                    if turn_entry and turn_entry.get("_line", 0) <= parent_line:
+                        turn_number = uuid_to_turn.get(turn.uuid, 0)
+                        break
+
+            branch_children = []
+            for ci, child_uuid in enumerate(all_children, 1):
+                # Compute max_line for this child
+                if ci < len(all_children):
+                    next_child = all_children[ci]
+                    max_line = self.by_uuid.get(next_child, {}).get("_line", float("inf"))
+                else:
+                    max_line = float("inf")
+
+                # Walk forward to leaf, backward to get full path
+                leaf_uuid = self._find_leaf(child_uuid, max_line)
+                child_path = self._walk_backward(leaf_uuid, stitch=True)
+
+                # Filter to entries AFTER the branch parent
+                parent_line = parent_entry.get("_line", 0) if parent_entry else 0
+                branch_entries = [
+                    e for e in child_path
+                    if e.get("_line", 0) > parent_line
+                    and e.get("_line", 0) < max_line
+                ]
+
+                # Get turns on this branch segment
+                branch_turns = group_into_turns(branch_entries, mode="text")
+
+                # Preview: first user text on this branch
+                preview = ""
+                if branch_turns:
+                    preview = branch_turns[0].user_text.replace("\n", " ").strip()
+                    if len(preview) > 80:
+                        preview = preview[:80] + "..."
+
+                is_active = child_uuid in active_set
+
+                branch_children.append(BranchChild(
+                    child_uuid=child_uuid,
+                    branch_number=ci,
+                    preview=preview,
+                    turn_count=len(branch_turns),
+                    entry_count=len(branch_entries),
+                    is_active=is_active,
+                ))
+
+            results.append(BranchInfo(
+                parent_uuid=parent_uuid,
+                parent_line_index=parent_entry.get("_line", 0) if parent_entry else 0,
+                turn_number=turn_number,
+                children=branch_children,
+            ))
+
+        return results
 
     def branch_points(self) -> list[BranchPoint]:
         """
@@ -664,7 +927,7 @@ def group_into_turns(raw_path: list[dict], mode: str = "text",
             # Extract text from user messages
             user_text = None
             if isinstance(content, str) and content.strip():
-                user_text = content
+                user_text = _strip_ansi(content)
             elif isinstance(content, list):
                 # List content may have text blocks alongside tool_results
                 text_parts = []
@@ -674,7 +937,7 @@ def group_into_turns(raw_path: list[dict], mode: str = "text",
                         if t:
                             text_parts.append(t)
                 if text_parts:
-                    user_text = "\n".join(text_parts)
+                    user_text = _strip_ansi("\n".join(text_parts))
 
             if user_text:
                 is_compact = bool(entry.get("isCompactSummary"))
@@ -704,7 +967,7 @@ def group_into_turns(raw_path: list[dict], mode: str = "text",
                 btype = block.get("type")
 
                 if btype == "text":
-                    text = block.get("text", "")
+                    text = _strip_ansi(block.get("text", ""))
                     if text.strip():
                         if current_turn.assistant_text:
                             current_turn.assistant_text += "\n" + text
@@ -904,7 +1167,7 @@ def format_raw_message(msg: RawMessage, index: int, total: int,
     if msg.uuid:
         header += f" uuid={msg.uuid[:12]}"
 
-    return f"{header}\n{'─' * 60}\n{msg.content}\n"
+    return f"{header}\n{'─' * 60}\n{_strip_ansi(msg.content)}\n"
 
 
 def format_turns_json(turns: list[Turn], session_id: str, total: int,
@@ -1093,7 +1356,22 @@ def cmd_list(args):
                 modified = ts.strftime("%Y-%m-%d %H:%M")
             else:
                 modified = s.modified[:16]
+
+        # Compute real turn count + branch info
         msg_info = f"{s.message_count} msgs"
+        try:
+            session = Session(s.path)
+            raw_path = session.active_path(stitch=True)
+            turns = group_into_turns(raw_path, mode="text")
+            turn_count = len(turns)
+            branch_infos = session.get_branch_info()
+            n_branches = len(branch_infos)
+            msg_info = f"{turn_count} turn{'s' if turn_count != 1 else ''}"
+            if n_branches:
+                msg_info += f", {n_branches} branch pt{'s' if n_branches != 1 else ''}"
+        except Exception:
+            pass  # fallback to messageCount already set
+
         print(f"[{i}] {s.session_id[:8]}... ({msg_info}, {modified})")
 
         display = s.summary or s.first_prompt
@@ -1112,7 +1390,7 @@ def cmd_view(args):
     session_file = resolve_session(project_dir, args.session)
     session = Session(session_file)
 
-    raw_path = session.active_path(stitch=not args.no_stitch)
+    raw_path = session.active_path(stitch=not args.no_stitch, branch=args.branch)
     if not raw_path:
         print("No messages in this session.")
         return
@@ -1180,7 +1458,7 @@ def cmd_copy(args):
     session_file = resolve_session(project_dir, args.session)
     session = Session(session_file)
 
-    raw_path = session.active_path(stitch=True)
+    raw_path = session.active_path(stitch=True, branch=args.branch)
     if not raw_path:
         print("No messages in this session.", file=sys.stderr)
         sys.exit(1)
@@ -1349,22 +1627,20 @@ def cmd_tree(args):
     session_file = resolve_session(project_dir, args.session)
     session = Session(session_file)
 
-    raw_path = session.active_path(stitch=True)
+    raw_path = session.active_path(stitch=True, branch=args.branch)
     if not raw_path:
         print("No messages in this session.")
         return
 
     turns = group_into_turns(raw_path, mode="text")
-    branch_points = session.branch_points()
+    branch_infos = session.get_branch_info()
 
-    # Build a set of UUIDs that are branch parents
-    branch_parent_uuids = {bp.parent_uuid for bp in branch_points}
-
+    label = "Active path" if args.branch == 0 else f"Branch {args.branch}"
     print(f"Session: {session.session_id}")
-    print(f"Turns: {len(turns)}, Branch points: {len(branch_points)}")
+    print(f"{label}: {len(turns)} turns")
     print("=" * 60)
 
-    # Show turns with branch markers
+    # Show turns
     for i, turn in enumerate(turns, 1):
         prefix = "├──" if i < len(turns) else "└──"
         user_preview = turn.user_text.replace("\n", " ")[:60]
@@ -1377,21 +1653,23 @@ def cmd_tree(args):
             asst_preview = turn.assistant_text.replace("\n", " ")[:60]
             if len(turn.assistant_text) > 60:
                 asst_preview += "..."
-            indent = "│   " if i < len(turns) else "    "
-            print(f"{indent}  Assistant: {asst_preview}")
+            indent = "│     " if i < len(turns) else "      "
+            print(f"{indent}Assistant: {asst_preview}")
 
-            if turn.tool_calls:
-                print(f"{indent}  ({len(turn.tool_calls)} tool calls)")
-
-    if branch_points:
-        print(f"\nBranch Points ({len(branch_points)}):")
-        print("─" * 40)
-        for bp in branch_points:
-            parent_entry = session.by_uuid.get(bp.parent_uuid, {})
-            parent_type = parent_entry.get("type", "?")
-            n_alts = len(bp.alternative_uuids)
-            print(f"  At {bp.parent_uuid[:12]}... ({parent_type}): "
-                  f"{n_alts} alternative{'s' if n_alts != 1 else ''}")
+    # Show branch details
+    if branch_infos:
+        for bi in branch_infos:
+            n_children = len(bi.children)
+            turn_label = f"turn #{bi.turn_number}" if bi.turn_number else "start"
+            print(f"\nBranches at {turn_label} ({n_children} branches):")
+            print("─" * 40)
+            for bc in bi.children:
+                active_marker = " <- active" if bc.is_active else ""
+                preview = f'"{bc.preview}"' if bc.preview else "(empty)"
+                print(f'  [{bc.branch_number}] {preview} '
+                      f'({bc.turn_count} turn{"s" if bc.turn_count != 1 else ""})'
+                      f'{active_marker}')
+            print(f"\nUse --branch N to view a specific branch")
 
 
 def cmd_export(args):
@@ -1400,7 +1678,7 @@ def cmd_export(args):
     session_file = resolve_session(project_dir, args.session)
     session = Session(session_file)
 
-    raw_path = session.active_path(stitch=True)
+    raw_path = session.active_path(stitch=True, branch=args.branch)
     if not raw_path:
         print("No messages in this session.")
         return
@@ -1485,6 +1763,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Include compaction summary messages")
     view_p.add_argument("--truncate", type=int, default=500, metavar="LEN",
                         help="Truncate length for raw content (default: 500, -1=none)")
+    view_p.add_argument("--branch", "-b", type=int, default=0, metavar="N",
+                        help="View Nth branch (1-indexed) instead of active path")
 
     # copy
     copy_p = subparsers.add_parser("copy", aliases=["cp"],
@@ -1500,6 +1780,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Include tool summaries")
     copy_p.add_argument("--raw", action="store_true",
                         help="Copy raw messages")
+    copy_p.add_argument("--branch", "-b", type=int, default=0, metavar="N",
+                        help="Copy from Nth branch instead of active path")
 
     # projects (no --project flag needed)
     subparsers.add_parser("projects", help="List all projects")
@@ -1517,6 +1799,8 @@ def build_parser() -> argparse.ArgumentParser:
     _add_project_arg(tree_p)
     tree_p.add_argument("session", nargs="?",
                         help="Session index or UUID prefix")
+    tree_p.add_argument("--branch", "-b", type=int, default=0, metavar="N",
+                        help="Show tree for Nth branch instead of active path")
 
     # export
     export_p = subparsers.add_parser("export", help="Export full session")
@@ -1529,6 +1813,8 @@ def build_parser() -> argparse.ArgumentParser:
                           help="Export raw messages")
     export_p.add_argument("--include-tools", action="store_true",
                           help="Include tool calls in export")
+    export_p.add_argument("--branch", "-b", type=int, default=0, metavar="N",
+                          help="Export Nth branch instead of active path")
 
     return parser
 

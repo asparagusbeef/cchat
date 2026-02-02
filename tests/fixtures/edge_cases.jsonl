@@ -1,0 +1,8 @@
+{{{not valid json at all
+{"type":"user","uuid":"uuid-9001","parentUuid":null,"isSidechain":false,"timestamp":"2025-01-15T15:00:00.000Z","sessionId":"sess-edge","message":{"role":"user","content":""},"userType":"external"}
+{"type":"user","uuid":"uuid-9002","parentUuid":"uuid-nonexistent","isSidechain":false,"timestamp":"2025-01-15T15:00:01.000Z","sessionId":"sess-edge","message":{"role":"user","content":"Orphan"},"userType":"external"}
+{"type":"assistant","uuid":"uuid-9003","parentUuid":"uuid-9001","isSidechain":false,"timestamp":"2025-01-15T15:00:02.000Z","sessionId":"sess-edge","message":{"role":"assistant","model":"claude-sonnet-4-20250514","id":"msg_01test9003","type":"message","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":5,"output_tokens":0}}}
+{"type":"user","uuid":null,"parentUuid":null,"isSidechain":false,"timestamp":"2025-01-15T15:00:03.000Z","sessionId":"sess-edge","message":{"role":"user","content":"No uuid"}}
+{"type":"unknown_type","uuid":"uuid-9004","parentUuid":null,"isSidechain":false,"timestamp":"2025-01-15T15:00:04.000Z","sessionId":"sess-edge"}
+{"type":"user","uuid":"uuid-9005","parentUuid":"uuid-9003","isSidechain":false,"timestamp":"2025-01-15T15:00:05.000Z","sessionId":"sess-edge","cwd":"/home/test","version":"2.1.7","message":{"role":"user","content":"Valid after edge cases"},"userType":"external"}
+{"type":"assistant","uuid":"uuid-9006","parentUuid":"uuid-9005","isSidechain":false,"timestamp":"2025-01-15T15:00:06.000Z","sessionId":"sess-edge","message":{"role":"assistant","model":"claude-sonnet-4-20250514","id":"msg_01test9006","type":"message","content":[{"type":"text","text":"Response to valid entry"}],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":7}}}

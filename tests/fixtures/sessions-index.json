@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "sessionId": "sess-simple",
+      "fullPath": "/home/test/.claude/projects/-home-test/sess-simple.jsonl",
+      "fileMtime": 1736942421000,
+      "summary": "Simple test conversation",
+      "firstPrompt": "Hello",
+      "messageCount": 6,
+      "created": "2025-01-15T10:00:00.000Z",
+      "modified": "2025-01-15T10:00:21.000Z",
+      "gitBranch": "",
+      "projectPath": "/home/test",
+      "isSidechain": false
+    },
+    {
+      "sessionId": "sess-tool",
+      "fullPath": "/home/test/.claude/projects/-home-test/sess-tool.jsonl",
+      "fileMtime": 1736946013000,
+      "summary": "Tool usage session",
+      "firstPrompt": "List the files",
+      "messageCount": 10,
+      "created": "2025-01-15T11:00:00.000Z",
+      "modified": "2025-01-15T11:00:13.000Z",
+      "gitBranch": "",
+      "projectPath": "/home/test",
+      "isSidechain": false
+    }
+  ],
+  "originalPath": "/home/test"
+}

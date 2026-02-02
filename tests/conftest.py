@@ -104,6 +104,23 @@ def mock_project_dir(tmp_path):
 
 
 @pytest.fixture
+def mock_project_dir_full(tmp_path):
+    """Mock project directory with ALL fixture session files."""
+    proj = tmp_path / "projects" / "-home-test"
+    proj.mkdir(parents=True)
+
+    for name in ["simple_session", "tool_session", "branched_session",
+                 "compacted_session", "complex_session"]:
+        dest = f"sess-{name.replace('_', '-')}.jsonl"
+        shutil.copy(FIXTURES_DIR / f"{name}.jsonl", proj / dest)
+
+    # Agent file should be excluded
+    (proj / "agent-test.jsonl").write_text('{"type":"summary"}\n')
+
+    return proj
+
+
+@pytest.fixture
 def mock_project_dir_with_index(mock_project_dir):
     """Mock project directory that also has sessions-index.json."""
     shutil.copy(FIXTURES_DIR / "sessions-index.json", mock_project_dir / "sessions-index.json")

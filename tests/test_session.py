@@ -33,6 +33,25 @@ class TestSessionLoading:
         assert positions["uuid-0001"] == 1  # line 0 is summary
         assert positions["uuid-0006"] == 6
 
+    def test_blank_lines_skipped(self, tmp_path):
+        """Blank lines in JSONL should be silently skipped."""
+        import json
+        lines = [
+            json.dumps({"type": "user", "uuid": "u1", "parentUuid": None,
+                         "message": {"role": "user", "content": "Hi"}}),
+            "",  # blank line
+            "   ",  # whitespace-only line
+            json.dumps({"type": "assistant", "uuid": "u2", "parentUuid": "u1",
+                         "message": {"role": "assistant",
+                                     "content": [{"type": "text", "text": "Hello"}]}}),
+        ]
+        p = tmp_path / "blanks.jsonl"
+        p.write_text("\n".join(lines) + "\n")
+        session = Session(p)
+        assert len(session.entries) == 2
+        assert "u1" in session.by_uuid
+        assert "u2" in session.by_uuid
+
     def test_lazy_loading(self, simple_session_path):
         session = Session(simple_session_path)
         assert session._entries is None
@@ -93,6 +112,21 @@ class TestFindLastUuid:
     def test_returns_last_entry(self, simple_session):
         last = simple_session._find_last_uuid()
         assert last["uuid"] == "uuid-0006"
+
+    def test_skips_entries_without_uuid(self, tmp_path):
+        """Entries with no uuid field should be skipped in _find_last_uuid."""
+        import json
+        lines = [
+            json.dumps({"type": "user", "uuid": "u1", "parentUuid": None,
+                         "message": {"role": "user", "content": "Hi"}}),
+            # Entry at end with no uuid (e.g., summary appended)
+            json.dumps({"type": "summary", "summary": "test"}),
+        ]
+        p = tmp_path / "no_uuid.jsonl"
+        p.write_text("\n".join(lines) + "\n")
+        session = Session(p)
+        last = session._find_last_uuid()
+        assert last["uuid"] == "u1"
 
     def test_skips_sidechain(self, tmp_path):
         """Last entry with isSidechain=true should be skipped."""
@@ -284,6 +318,150 @@ class TestGetBranchInfo:
         # The active child should be uuid-2005 (later in file)
         assert active_children[0].child_uuid == "uuid-2005"
 
+    def test_empty_session_no_info(self, tmp_path):
+        """get_branch_info on empty session returns []."""
+        p = tmp_path / "empty.jsonl"
+        p.write_text("")
+        session = Session(p)
+        assert session.get_branch_info() == []
+
+    def test_branch_preview_truncation(self, tmp_path):
+        """Branch preview > 80 chars should be truncated."""
+        import json
+        long_text = "X" * 100
+        lines = [
+            json.dumps({"type": "user", "uuid": "u1", "parentUuid": None,
+                         "message": {"role": "user", "content": "Start"}}),
+            json.dumps({"type": "assistant", "uuid": "u2", "parentUuid": "u1",
+                         "message": {"role": "assistant",
+                                     "content": [{"type": "text", "text": "OK"}]}}),
+            # Branch 1: long user text
+            json.dumps({"type": "user", "uuid": "u3", "parentUuid": "u2",
+                         "message": {"role": "user", "content": long_text}}),
+            json.dumps({"type": "assistant", "uuid": "u4", "parentUuid": "u3",
+                         "message": {"role": "assistant",
+                                     "content": [{"type": "text", "text": "Done A"}]}}),
+            # Branch 2
+            json.dumps({"type": "user", "uuid": "u5", "parentUuid": "u2",
+                         "message": {"role": "user", "content": "Short B"}}),
+            json.dumps({"type": "assistant", "uuid": "u6", "parentUuid": "u5",
+                         "message": {"role": "assistant",
+                                     "content": [{"type": "text", "text": "Done B"}]}}),
+        ]
+        p = tmp_path / "long_preview.jsonl"
+        p.write_text("\n".join(lines) + "\n")
+        session = Session(p)
+        infos = session.get_branch_info()
+        assert len(infos) >= 1
+        # Check that at least one preview is truncated
+        previews = [c.preview for c in infos[0].children]
+        truncated = [p for p in previews if p.endswith("...")]
+        assert len(truncated) >= 1
+
     def test_complex_session_has_branch(self, complex_session):
         infos = complex_session.get_branch_info()
         assert len(infos) >= 1
+
+
+# ── _is_mechanical_fork edge cases ──────────────────────────────────────
+
+class TestIsMechanicalForkEdgeCases:
+    def test_nonexistent_parent_returns_false(self, simple_session):
+        assert simple_session._is_mechanical_fork("nonexistent-uuid", ["uuid-0001"]) is False
+
+    def test_nonexistent_child_handled(self, simple_session):
+        """Child UUIDs that don't exist in by_uuid should not crash."""
+        result = simple_session._is_mechanical_fork("uuid-0001", ["nonexistent1", "nonexistent2"])
+        # Should complete without error; parent is user type so not tool_use
+        assert isinstance(result, bool)
+
+
+# ── _branch_path edge cases ─────────────────────────────────────────────
+
+class TestBranchPathEdgeCases:
+    def test_branch_on_session_without_branches_exits(self, simple_session):
+        """Requesting branch N on a session with no branches should exit."""
+        with pytest.raises(SystemExit):
+            simple_session.active_path(branch=1)
+
+    def test_branch_on_empty_session(self, tmp_path):
+        """Branch path on empty session returns empty list."""
+        p = tmp_path / "empty.jsonl"
+        p.write_text("")
+        session = Session(p)
+        assert session._branch_path(1) == []
+
+
+# ── _walk_backward edge cases ───────────────────────────────────────────
+
+class TestWalkBackwardEdgeCases:
+    def test_walk_from_nonexistent_uuid(self, simple_session):
+        """Walking from a UUID not in by_uuid should return empty path."""
+        path = simple_session._walk_backward("nonexistent-uuid")
+        assert path == []
+
+    def test_walk_stitch_positional_fallback(self, tmp_path):
+        """When parentUuid points to nonexistent entry, stitch uses positional fallback."""
+        import json
+        lines = [
+            json.dumps({"type": "user", "uuid": "u1", "parentUuid": None,
+                         "message": {"role": "user", "content": "First"}}),
+            json.dumps({"type": "assistant", "uuid": "u2", "parentUuid": "u1",
+                         "message": {"role": "assistant",
+                                     "content": [{"type": "text", "text": "Response"}]}}),
+            # Entry whose parent doesn't exist in session
+            json.dumps({"type": "user", "uuid": "u3", "parentUuid": "nonexistent",
+                         "message": {"role": "user", "content": "Orphan"}}),
+        ]
+        p = tmp_path / "fallback.jsonl"
+        p.write_text("\n".join(lines) + "\n")
+        session = Session(p)
+        # Walk backward from u3 with stitch=True should use positional fallback
+        path = session._walk_backward("u3", stitch=True)
+        uuids = [e["uuid"] for e in path]
+        assert "u3" in uuids
+        # Positional fallback should find u2 as nearest prior entry
+        assert "u2" in uuids
+
+    def test_walk_compact_boundary_without_logical_parent(self, tmp_path):
+        """compact_boundary without logicalParentUuid uses positional fallback."""
+        import json
+        lines = [
+            json.dumps({"type": "user", "uuid": "u1", "parentUuid": None,
+                         "message": {"role": "user", "content": "Pre-compaction"}}),
+            json.dumps({"type": "assistant", "uuid": "u2", "parentUuid": "u1",
+                         "message": {"role": "assistant",
+                                     "content": [{"type": "text", "text": "Answer"}]}}),
+            # compact_boundary with NO logicalParentUuid
+            json.dumps({"type": "system", "uuid": "cb1", "parentUuid": None,
+                         "subtype": "compact_boundary"}),
+            json.dumps({"type": "user", "uuid": "u3", "parentUuid": "cb1",
+                         "message": {"role": "user", "content": "Post-compaction"}}),
+            json.dumps({"type": "assistant", "uuid": "u4", "parentUuid": "u3",
+                         "message": {"role": "assistant",
+                                     "content": [{"type": "text", "text": "Response"}]}}),
+        ]
+        p = tmp_path / "cb_fallback.jsonl"
+        p.write_text("\n".join(lines) + "\n")
+        session = Session(p)
+        # Walking backward from u4 with stitch should cross boundary via fallback
+        path = session._walk_backward("u4", stitch=True)
+        uuids = [e["uuid"] for e in path]
+        assert "u4" in uuids
+        assert "cb1" in uuids
+        # Positional fallback should reach u2
+        assert "u2" in uuids
+
+
+# ── _find_leaf edge cases ───────────────────────────────────────────────
+
+class TestFindLeafEdgeCases:
+    def test_find_leaf_at_leaf(self, simple_session):
+        """Finding leaf from the actual leaf returns itself."""
+        leaf = simple_session._find_leaf("uuid-0006")
+        assert leaf == "uuid-0006"
+
+    def test_find_leaf_from_root(self, simple_session):
+        """Finding leaf from root walks to the end."""
+        leaf = simple_session._find_leaf("uuid-0001")
+        assert leaf == "uuid-0006"

@@ -54,6 +54,23 @@ class TestFindProjectDir:
 # ── list_all_projects ─────────────────────────────────────────────────────
 
 class TestListAllProjects:
+    def test_projects_dir_not_exists(self, tmp_path, monkeypatch):
+        """list_all_projects returns [] when PROJECTS_DIR doesn't exist."""
+        monkeypatch.setattr(cchat, "PROJECTS_DIR", tmp_path / "nonexistent")
+        assert ProjectResolver.list_all_projects() == []
+
+    def test_skips_non_directory_entries(self, mock_claude_dir):
+        """Non-directory files in PROJECTS_DIR should be skipped."""
+        _, projects_dir = mock_claude_dir
+        # Create a regular file (not dir) in PROJECTS_DIR
+        (projects_dir / "stray-file.txt").write_text("not a directory")
+        # Create a valid project dir
+        proj = projects_dir / "-home-test"
+        proj.mkdir()
+        (proj / "s1.jsonl").write_text('{"type":"user"}\n')
+        projects = ProjectResolver.list_all_projects()
+        assert len(projects) == 1
+
     def test_empty(self, mock_claude_dir):
         projects = ProjectResolver.list_all_projects()
         assert projects == []
@@ -128,6 +145,31 @@ class TestGetProjectDirOrExit:
 
         result = ProjectResolver.get_project_dir_or_exit("test-project")
         assert result == proj
+
+    def test_project_override_via_path(self, mock_claude_dir):
+        """Override with a real path that resolves to a project dir."""
+        _, projects_dir = mock_claude_dir
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            project_key = ProjectResolver.get_project_key(Path(td))
+            proj = projects_dir / project_key
+            proj.mkdir()
+            (proj / "s.jsonl").write_text('{"type":"user"}\n')
+            result = ProjectResolver.get_project_dir_or_exit(td)
+            assert result == proj
+
+    def test_cwd_match_succeeds(self, mock_claude_dir, monkeypatch):
+        """get_project_dir_or_exit succeeds when cwd matches a project."""
+        _, projects_dir = mock_claude_dir
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            project_key = ProjectResolver.get_project_key(Path(td))
+            proj = projects_dir / project_key
+            proj.mkdir()
+            (proj / "s.jsonl").write_text('{"type":"user"}\n')
+            monkeypatch.chdir(td)
+            result = ProjectResolver.get_project_dir_or_exit()
+            assert result == proj
 
     def test_project_override_not_found_exits(self, mock_claude_dir):
         with pytest.raises(SystemExit):

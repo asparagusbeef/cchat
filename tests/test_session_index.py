@@ -44,6 +44,33 @@ class TestSessionIndexSlowPath:
         assert meta.first_prompt == "Hello"
         assert meta.message_count > 0
 
+    def test_get_metadata_with_custom_title(self, tmp_path):
+        """Custom title should be used as summary when present."""
+        import json
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        lines = [
+            json.dumps({"type": "summary", "summary": "Original summary"}),
+            json.dumps({"type": "custom-title", "customTitle": "My Custom Title"}),
+            json.dumps({"type": "user", "uuid": "u1", "parentUuid": None,
+                         "message": {"role": "user", "content": "Hello"}}),
+            json.dumps({"type": "assistant", "uuid": "u2", "parentUuid": "u1",
+                         "message": {"role": "assistant",
+                                     "content": [{"type": "text", "text": "Hi"}]}}),
+        ]
+        p = proj / "custom.jsonl"
+        p.write_text("\n".join(lines) + "\n")
+        index = SessionIndex(proj)
+        meta = index.get_metadata("custom", p)
+        assert meta.summary == "My Custom Title"
+
+    def test_empty_list_sessions(self, tmp_path):
+        """Empty project dir returns empty list."""
+        proj = tmp_path / "empty"
+        proj.mkdir()
+        index = SessionIndex(proj)
+        assert index.list_sessions() == []
+
 
 # ── list_sessions ─────────────────────────────────────────────────────────
 
